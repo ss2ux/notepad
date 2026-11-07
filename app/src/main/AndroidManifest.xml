@@ -1,0 +1,57 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 파일은 시스템 파일 선택기(SAF)나 다른 앱이 넘겨준 주소로만 열고 저장하므로 저장소 권한이 필요 없다. 인터넷 권한도 없다. -->
+    <application
+        android:label="자막 메모장"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/AppTheme">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 1) 종류(MIME)로 연결: 파일 관리자가 자막/텍스트 종류를 알려 주는 경우 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/vtt" />
+                <data android:mimeType="text/srt" />
+                <data android:mimeType="text/x-lrc" />
+                <data android:mimeType="application/x-subrip" />
+                <data android:mimeType="application/x-lrc" />
+            </intent-filter>
+
+            <!-- 2) 확장자로 연결: 종류를 모르는 파일(octet-stream 등)이라도 이름이 .vtt .srt .lrc .txt 이면 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.vtt" />
+                <data android:pathPattern=".*\\..*\\.vtt" />
+                <data android:pathPattern=".*\\..*\\..*\\.vtt" />
+                <data android:pathPattern=".*\\.srt" />
+                <data android:pathPattern=".*\\..*\\.srt" />
+                <data android:pathPattern=".*\\..*\\..*\\.srt" />
+                <data android:pathPattern=".*\\.lrc" />
+                <data android:pathPattern=".*\\..*\\.lrc" />
+                <data android:pathPattern=".*\\..*\\..*\\.lrc" />
+                <data android:pathPattern=".*\\.txt" />
+                <data android:pathPattern=".*\\..*\\.txt" />
+                <data android:pathPattern=".*\\..*\\..*\\.txt" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
