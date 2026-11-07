@@ -51,6 +51,12 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
         value = value.copy(selection = TextRange(0, value.text.length))
     }
 
+    /** 검색 결과로 이동할 때처럼 글자는 그대로 두고 선택 범위만 바꾼다 */
+    fun select(start: Int, end: Int) {
+        val len = value.text.length
+        value = value.copy(selection = TextRange(start.coerceIn(0, len), end.coerceIn(0, len)))
+    }
+
     fun openFromIntent(u: Uri) {
         viewModelScope.launch { open(u) }
     }
