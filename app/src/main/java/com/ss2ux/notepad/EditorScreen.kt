@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,6 +36,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.FindReplace
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
@@ -115,6 +117,19 @@ private class EditorRefs {
 
 private const val MAX_MATCHES = 10_000
 
+/** q 가 모두 몇 번 나오는지(개수 제한 없이) */
+private fun countAll(text: String, q: String): Int {
+    if (q.isEmpty()) return 0
+    var n = 0
+    var from = 0
+    while (true) {
+        val i = text.indexOf(q, from, ignoreCase = true)
+        if (i < 0) return n
+        n++
+        from = i + q.length
+    }
+}
+
 /** q 가 나오는 모든 위치(겹치지 않게, 대소문자 구분 없이). 너무 많으면 MAX_MATCHES 개에서 멈춘다. */
 private fun findAll(text: String, q: String): List<Int> {
     if (q.isEmpty()) return emptyList()
@@ -165,6 +180,9 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
     var searchOpen by remember { mutableStateOf(false) }
     var searchValue by remember { mutableStateOf(TextFieldValue("")) }
     val query = searchValue.text
+    var replaceOpen by remember { mutableStateOf(false) }
+    var replaceValue by remember { mutableStateOf(TextFieldValue("")) }
+    var pendingReplaceAll by remember { mutableStateOf<Int?>(null) }
 
     // 안내 문구는 토스트로 한 번만 보여 준다
     LaunchedEffect(vm.message) {
@@ -278,6 +296,33 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
         goTo(m, idx, q.length)
     }
 
+    /** 지금 선택된 게 검색 결과면 바꾸고 다음 결과로, 아니면 다음 결과로 이동만 한다 */
+    fun replaceOne() {
+        if (vm.busy || query.isEmpty()) return
+        val s = vm.value.selection
+        val t = vm.value.text
+        val repl = replaceValue.text
+        val onMatch = s.max - s.min == query.length &&
+            t.regionMatches(s.min, query, 0, query.length, ignoreCase = true)
+        if (!onMatch) {
+            step(true)
+            return
+        }
+        vm.replaceRange(s.min, s.max, repl)
+        val m = findAll(vm.value.text, query)
+        if (m.isEmpty()) return
+        val from = s.min + repl.length
+        val st = m[m.indexOfFirst { it >= from }.let { if (it < 0) 0 else it }]
+        vm.select(st, st + query.length)
+        reveal(st, 0.35f, afterLayout = true)
+    }
+
+    fun requestReplaceAll() {
+        if (vm.busy || query.isEmpty()) return
+        val n = countAll(vm.value.text, query)
+        if (n == 0) vm.message = "바꿀 글자가 없어요" else pendingReplaceAll = n
+    }
+
     fun openSearch() {
         val s = vm.value.selection
         val sub = if (!s.collapsed && s.max - s.min <= 100) vm.value.text.substring(s.min, s.max) else ""
@@ -363,7 +408,14 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
                     onPrev = { step(false) },
                     onNext = { step(true) },
                     onClose = { closeSearch() },
-                    focus = searchFocus
+                    focus = searchFocus,
+                    replaceOpen = replaceOpen,
+                    onToggleReplace = { replaceOpen = !replaceOpen },
+                    replaceValue = replaceValue,
+                    onReplaceChange = { replaceValue = it },
+                    canReplace = query.isNotEmpty() && !vm.busy,
+                    onReplaceOne = { replaceOne() },
+                    onReplaceAll = { requestReplaceAll() }
                 )
             }
             BoxWithConstraints(
@@ -417,6 +469,24 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
         }
     }
 
+    pendingReplaceAll?.let { n ->
+        AlertDialog(
+            onDismissRequest = { pendingReplaceAll = null },
+            title = { Text("모두 바꾸기") },
+            text = { Text("\"$query\" → \"${replaceValue.text}\"\n${n}곳을 바꿀까요? (저장하기 전까지는 파일에 반영되지 않아요)") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingReplaceAll = null
+                    val done = vm.replaceAll(query, replaceValue.text)
+                    vm.message = "${done}곳을 바꿨어요"
+                }) { Text("바꾸기") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingReplaceAll = null }) { Text("취소") }
+            }
+        )
+    }
+
     pendingDiscard?.let { action ->
         AlertDialog(
             onDismissRequest = { pendingDiscard = null },
@@ -440,51 +510,88 @@ private fun SearchBar(
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onClose: () -> Unit,
-    focus: FocusRequester
+    focus: FocusRequester,
+    replaceOpen: Boolean,
+    onToggleReplace: () -> Unit,
+    replaceValue: TextFieldValue,
+    onReplaceChange: (TextFieldValue) -> Unit,
+    canReplace: Boolean,
+    onReplaceOne: () -> Unit,
+    onReplaceAll: () -> Unit
 ) {
+    val fieldStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
     Surface(tonalElevation = 2.dp) {
-        Row(
-            Modifier.fillMaxWidth().height(52.dp).padding(start = 16.dp, end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                if (value.text.isEmpty()) {
-                    Text(
-                        "검색",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 16.sp
+        Column(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier.fillMaxWidth().height(52.dp).padding(start = 4.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onToggleReplace, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        Icons.Outlined.FindReplace,
+                        contentDescription = "바꾸기 열기/닫기",
+                        tint = if (replaceOpen) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                BasicTextField(
-                    value = value,
-                    onValueChange = onValueChange,
-                    singleLine = true,
-                    textStyle = TextStyle(
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 16.sp
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { onNext() }),
-                    modifier = Modifier.fillMaxWidth().focusRequester(focus)
-                )
+                Box(Modifier.weight(1f).padding(start = 4.dp), contentAlignment = Alignment.CenterStart) {
+                    if (value.text.isEmpty()) {
+                        Text("검색", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 16.sp)
+                    }
+                    BasicTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        singleLine = true,
+                        textStyle = fieldStyle,
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = { onNext() }),
+                        modifier = Modifier.fillMaxWidth().focusRequester(focus)
+                    )
+                }
+                if (countLabel.isNotEmpty()) {
+                    Text(
+                        countLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                }
+                IconButton(onClick = onPrev, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = "이전 결과")
+                }
+                IconButton(onClick = onNext, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "다음 결과")
+                }
+                IconButton(onClick = onClose, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Outlined.Close, contentDescription = "검색 닫기")
+                }
             }
-            if (countLabel.isNotEmpty()) {
-                Text(
-                    countLabel,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 4.dp)
-                )
-            }
-            IconButton(onClick = onPrev) {
-                Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = "이전 결과")
-            }
-            IconButton(onClick = onNext) {
-                Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "다음 결과")
-            }
-            IconButton(onClick = onClose) {
-                Icon(Icons.Outlined.Close, contentDescription = "검색 닫기")
+            if (replaceOpen) {
+                Row(
+                    Modifier.fillMaxWidth().height(48.dp).padding(start = 48.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(Modifier.weight(1f).padding(start = 4.dp), contentAlignment = Alignment.CenterStart) {
+                        if (replaceValue.text.isEmpty()) {
+                            Text(
+                                "바꿀 내용 (비우면 삭제)",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 16.sp
+                            )
+                        }
+                        BasicTextField(
+                            value = replaceValue,
+                            onValueChange = onReplaceChange,
+                            singleLine = true,
+                            textStyle = fieldStyle,
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    TextButton(onClick = onReplaceOne, enabled = canReplace) { Text("바꾸기") }
+                    TextButton(onClick = onReplaceAll, enabled = canReplace) { Text("모두 바꾸기") }
+                }
             }
         }
     }

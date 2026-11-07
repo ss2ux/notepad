@@ -57,6 +57,38 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
         value = value.copy(selection = TextRange(start.coerceIn(0, len), end.coerceIn(0, len)))
     }
 
+    /** [start, end) 를 with 로 바꾸고, 바꾼 글자를 선택 상태로 둔다 */
+    fun replaceRange(start: Int, end: Int, with: String) {
+        val t = value.text
+        val a = start.coerceIn(0, t.length)
+        val b = end.coerceIn(a, t.length)
+        val nt = t.substring(0, a) + with + t.substring(b)
+        value = TextFieldValue(nt, TextRange(a, a + with.length))
+        dirty = nt != savedText
+    }
+
+    /** q 가 나오는 곳(대소문자 구분 없이)을 전부 with 로 바꾸고 바꾼 개수를 돌려준다 */
+    fun replaceAll(q: String, with: String): Int {
+        if (q.isEmpty()) return 0
+        val t = value.text
+        val sb = StringBuilder(t.length)
+        var from = 0
+        var n = 0
+        while (true) {
+            val i = t.indexOf(q, from, ignoreCase = true)
+            if (i < 0) break
+            sb.append(t, from, i).append(with)
+            from = i + q.length
+            n++
+        }
+        if (n == 0) return 0
+        sb.append(t, from, t.length)
+        val nt = sb.toString()
+        value = TextFieldValue(nt, TextRange(value.selection.min.coerceAtMost(nt.length)))
+        dirty = nt != savedText
+        return n
+    }
+
     fun openFromIntent(u: Uri) {
         viewModelScope.launch { open(u) }
     }
