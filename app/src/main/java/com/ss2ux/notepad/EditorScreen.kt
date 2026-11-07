@@ -4,36 +4,34 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.text.Editable
+import android.text.Spanned
+import android.text.TextWatcher
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FindReplace
@@ -56,44 +54,47 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.text.input.TransformedText
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.doOnLayout
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** 파일 선택기: 읽기뿐 아니라 쓰기 권한(덮어쓰기용)도 요청하는 OpenDocument */
@@ -109,26 +110,34 @@ class OpenDocumentRw : ActivityResultContracts.OpenDocument() {
         )
 }
 
-/** 글자 칸의 마지막 레이아웃 결과와, 붙여넣기 직후 화면을 옮겨야 하는지 여부 */
+// ---- 보조 상태/함수 ------------------------------------------------------------
+
+private const val MAX_MATCHES = 10_000       // 검색 결과 개수 상한(표시/이동용)
+private const val MAX_HIGHLIGHTS = 1_500     // 한 번에 칠하는 결과 수 상한(화면에 보이는 부분만 칠한다)
+
+/** 스크롤바가 읽는 값. EditText 가 바뀔 때마다 갱신한다. */
+private class ScrollMetrics {
+    var scrollY by mutableIntStateOf(0)
+    var maxScroll by mutableIntStateOf(0)
+}
+
+private fun NotepadEditText.readMetrics(m: ScrollMetrics) {
+    m.scrollY = scrollY
+    m.maxScroll = maxScrollY()
+}
+
+/** 상태가 아닌 단순 보관용 */
 private class EditorRefs {
-    var layout: TextLayoutResult? = null
-    var pendingReveal = false
+    var loading = false          // 파일 내용을 채워 넣는 중이면 "사용자가 고쳤다"로 치지 않는다
+    var pendingPaste = false     // 한 번에 여러 글자가 들어왔다(붙여넣기)
+    val spans = ArrayList<MatchSpan>()
+    var jumpJob: Job? = null
 }
 
-private const val MAX_MATCHES = 10_000
+private class Matches(val starts: List<Int>, val len: Int)
+private val NO_MATCHES = Matches(emptyList(), 0)
 
-/** q 가 모두 몇 번 나오는지(개수 제한 없이) */
-private fun countAll(text: String, q: String): Int {
-    if (q.isEmpty()) return 0
-    var n = 0
-    var from = 0
-    while (true) {
-        val i = text.indexOf(q, from, ignoreCase = true)
-        if (i < 0) return n
-        n++
-        from = i + q.length
-    }
-}
+private data class HlKey(val found: Matches, val selStart: Int, val selEnd: Int, val scrollY: Int)
 
 /** q 가 나오는 모든 위치(겹치지 않게, 대소문자 구분 없이). 너무 많으면 MAX_MATCHES 개에서 멈춘다. */
 private fun findAll(text: String, q: String): List<Int> {
@@ -144,45 +153,156 @@ private fun findAll(text: String, q: String): List<Int> {
     return out
 }
 
-/** 검색 결과를 배경색으로 칠한다. 글자 수는 그대로라 커서/선택 위치 계산은 영향 없음. */
-private class MatchHighlight(
-    private val starts: List<Int>,
-    private val len: Int,
-    private val current: Int,
-    private val normal: Color,
-    private val strong: Color
-) : VisualTransformation {
-    override fun filter(text: AnnotatedString): TransformedText {
-        val b = AnnotatedString.Builder(text)
-        for (i in starts.indices) {
-            val s = starts[i]
-            val e = s + len
-            if (e > text.length) break
-            b.addStyle(SpanStyle(background = if (i == current) strong else normal), s, e)
-        }
-        return TransformedText(b.toAnnotatedString(), OffsetMapping.Identity)
+/** q 가 모두 몇 번 나오는지(개수 제한 없이) */
+private fun countAll(text: String, q: String): Int {
+    if (q.isEmpty()) return 0
+    var n = 0
+    var from = 0
+    while (true) {
+        val i = text.indexOf(q, from, ignoreCase = true)
+        if (i < 0) return n
+        n++
+        from = i + q.length
     }
 }
+
+private fun replaceAllText(t: String, q: String, with: String): Pair<String, Int> {
+    if (q.isEmpty()) return t to 0
+    val sb = StringBuilder(t.length)
+    var from = 0
+    var n = 0
+    while (true) {
+        val i = t.indexOf(q, from, ignoreCase = true)
+        if (i < 0) break
+        sb.append(t, from, i).append(with)
+        from = i + q.length
+        n++
+    }
+    if (n == 0) return t to 0
+    sb.append(t, from, t.length)
+    return sb.toString() to n
+}
+
+/** 정렬된 list 에서 v 이상인 첫 위치 */
+private fun lowerBound(list: List<Int>, v: Int): Int {
+    var lo = 0
+    var hi = list.size
+    while (lo < hi) {
+        val mid = (lo + hi) ushr 1
+        if (list[mid] < v) lo = mid + 1 else hi = mid
+    }
+    return lo
+}
+
+/**
+ * 검색 결과 중 "지금 화면에 보이는 부분"에 있는 것만 배경색을 칠한다(전체를 칠하면 긴 글에서 느려진다).
+ * 현재 선택된 결과는 진한 색으로 칠한다.
+ */
+private fun applyHighlights(
+    edit: NotepadEditText,
+    spans: ArrayList<MatchSpan>,
+    found: Matches,
+    curStart: Int,
+    curEnd: Int,
+    normal: Int,
+    strong: Int
+) {
+    val text = edit.text
+    for (sp in spans) text.removeSpan(sp)
+    spans.clear()
+    val l = edit.layout ?: return
+    if (found.starts.isEmpty() || found.len <= 0 || l.lineCount == 0) return
+    val topLine = l.getLineForVertical(edit.scrollY)
+    val botLine = l.getLineForVertical(edit.scrollY + edit.height)
+    val from = (l.getLineStart(topLine) - found.len).coerceAtLeast(0)
+    val to = l.getLineEnd(botLine)
+    var i = lowerBound(found.starts, from)
+    var n = 0
+    while (i < found.starts.size && n < MAX_HIGHLIGHTS) {
+        val s = found.starts[i]
+        if (s >= to) break
+        val e = s + found.len
+        if (e <= text.length) {
+            val sp = MatchSpan(if (s == curStart && e == curEnd) strong else normal)
+            text.setSpan(sp, s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            spans.add(sp)
+        }
+        i++
+        n++
+    }
+}
+
+// ---- 화면 -----------------------------------------------------------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
     val context = LocalContext.current
-    val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    val focus = remember { FocusRequester() }
-    val searchFocus = remember { FocusRequester() }
-    val scrollState = rememberScrollState()
+    val edit = remember(context) { NotepadEditText(context) }
     val refs = remember { EditorRefs() }
-    var viewportPx by remember { mutableFloatStateOf(0f) }
+    val metrics = remember { ScrollMetrics() }
+    var textVersion by remember { mutableIntStateOf(0) }
+    var selStart by remember { mutableIntStateOf(0) }
+    var selEnd by remember { mutableIntStateOf(0) }
+    var found by remember { mutableStateOf(NO_MATCHES) }
+    var trackPx by remember { mutableFloatStateOf(0f) }
     var pendingDiscard by remember { mutableStateOf<(() -> Unit)?>(null) }
 
+    val searchFocus = remember { FocusRequester() }
     var searchOpen by remember { mutableStateOf(false) }
     var searchValue by remember { mutableStateOf(TextFieldValue("")) }
-    val query = searchValue.text
     var replaceOpen by remember { mutableStateOf(false) }
     var replaceValue by remember { mutableStateOf(TextFieldValue("")) }
     var pendingReplaceAll by remember { mutableStateOf<Int?>(null) }
+    val query = searchValue.text
+
+    // EditText 와 연결: 고쳤는지 알아채고, 스크롤바/선택 위치를 갱신하고, 화면이 사라질 때 글을 맡겨 둔다
+    DisposableEffect(edit) {
+        edit.onMetrics = { edit.readMetrics(metrics) }
+        edit.onSelection = { s, e -> selStart = s; selEnd = e }
+        val watcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                // 한 번에 2글자 이상 들어오면 붙여넣기(또는 단어 자동완성)로 본다
+                if (!refs.loading && count >= 2) refs.pendingPaste = true
+            }
+            override fun afterTextChanged(s: Editable?) {
+                if (refs.loading) return
+                vm.markEdited()
+                textVersion++
+                edit.post {
+                    edit.readMetrics(metrics)
+                    // 붙여넣은 글의 끝(커서)이 화면 가장자리거나 밖이면 그쪽으로 화면을 옮긴다
+                    if (refs.pendingPaste) {
+                        refs.pendingPaste = false
+                        edit.revealOffset(edit.selectionEnd, 0.7f)
+                    }
+                }
+            }
+        }
+        edit.addTextChangedListener(watcher)
+        onDispose {
+            edit.removeTextChangedListener(watcher)
+            edit.onMetrics = null
+            edit.onSelection = null
+            vm.stash(edit.text.toString(), edit.selectionStart, edit.selectionEnd, edit.scrollY)
+        }
+    }
+
+    // 파일을 새로 읽었거나 화면이 새로 만들어졌을 때 EditText 에 글을 채운다
+    LaunchedEffect(vm.docVersion) {
+        refs.loading = true
+        edit.setText(vm.docText)
+        refs.loading = false
+        val len = edit.text.length
+        edit.setSelection(vm.docSelStart.coerceIn(0, len), vm.docSelEnd.coerceIn(0, len))
+        val y = vm.docScrollY
+        edit.doOnLayout {
+            edit.scrollToY(y)
+            edit.readMetrics(metrics)
+        }
+    }
 
     // 안내 문구는 토스트로 한 번만 보여 준다
     LaunchedEffect(vm.message) {
@@ -199,7 +319,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
     val saveAsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { u ->
-        if (u != null) scope.launch { vm.saveTo(u, true) }
+        if (u != null) scope.launch { vm.saveTo(u, true, edit.text.toString()) }
     }
 
     fun saveAs() {
@@ -213,7 +333,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             return
         }
         scope.launch {
-            if (vm.saveTo(target, false) == SaveResult.DENIED) {
+            if (vm.saveTo(target, false, edit.text.toString()) == SaveResult.DENIED) {
                 Toast.makeText(
                     context, "이 파일에는 바로 저장할 수 없어요. 다른 이름으로 저장해 주세요.", Toast.LENGTH_LONG
                 ).show()
@@ -226,108 +346,154 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
         if (vm.dirty) pendingDiscard = action else action()
     }
 
-    // ---- 화면 이동 ------------------------------------------------------------
-    val padPx = with(density) { 16.dp.toPx() }      // 글자 칸 위쪽 여백(스크롤 내용 안쪽)
-    val marginPx = with(density) { 48.dp.toPx() }   // 화면 가장자리에서 이만큼 안쪽이면 "보인다"고 본다
+    // ---- 검색 -----------------------------------------------------------------
 
-    /**
-     * offset 위치(커서/검색 결과)가 화면에 편하게 보이지 않으면 스크롤해서 보이게 한다.
-     * anchor: 이동할 때 그 줄이 화면 높이의 어디쯤(0=맨 위, 1=맨 아래)에 오게 할지.
-     * afterLayout: 글자가 방금 바뀐 경우, 새 높이가 스크롤에 반영될 때까지 두 프레임 기다린다.
-     */
-    fun reveal(offset: Int, anchor: Float, afterLayout: Boolean = false) {
-        scope.launch {
-            if (afterLayout) {
-                withFrameNanos { }
-                withFrameNanos { }
-            }
-            val l = refs.layout ?: return@launch
-            val vp = viewportPx
-            if (vp <= 0f) return@launch
-            val o = offset.coerceIn(0, l.layoutInput.text.length)
-            val rect = l.getCursorRect(o)
-            val top = rect.top + padPx
-            val bottom = rect.bottom + padPx
-            val viewTop = scrollState.value.toFloat()
-            val margin = minOf(marginPx, vp / 4f)
-            if (top < viewTop + margin || bottom > viewTop + vp - margin) {
-                val target = (top - vp * anchor).roundToInt().coerceIn(0, scrollState.maxValue)
-                scrollState.scrollTo(target)
-            }
+    // 결과 목록(칠하기/개수 표시용)은 글을 고친 뒤 잠깐 쉬었다가 다른 스레드에서 계산한다
+    LaunchedEffect(searchOpen, query) {
+        if (!searchOpen || query.isEmpty()) {
+            found = NO_MATCHES
+            return@LaunchedEffect
+        }
+        val q = query
+        snapshotFlow { textVersion }.collectLatest {
+            delay(200)
+            val snap = edit.text.toString()
+            val list = withContext(Dispatchers.Default) { findAll(snap, q) }
+            found = Matches(list, q.length)
         }
     }
 
-    // ---- 검색 -----------------------------------------------------------------
-    val text = vm.value.text
-    val matches = remember(text, query, searchOpen) {
-        if (searchOpen) findAll(text, query) else emptyList()
+    // 화면에 보이는 부분의 결과만 칠한다 (스크롤/선택/결과가 바뀌면 잠깐 뒤에 다시)
+    val hlNormal = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.35f).toArgb()
+    val hlStrong = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f).toArgb()
+    val hlColors by rememberUpdatedState(hlNormal to hlStrong)
+    LaunchedEffect(edit) {
+        snapshotFlow {
+            HlKey(found, min(selStart, selEnd), max(selStart, selEnd), metrics.scrollY)
+        }.collectLatest { k ->
+            delay(80)
+            applyHighlights(edit, refs.spans, k.found, k.selStart, k.selEnd, hlColors.first, hlColors.second)
+        }
     }
-    val sel = vm.value.selection
-    // 지금 선택된 부분이 검색 결과 중 하나면 그게 "현재 결과"
-    val curIdx = if (matches.isNotEmpty() && sel.max - sel.min == query.length) {
-        matches.indexOf(sel.min)
-    } else -1
 
-    fun goTo(list: List<Int>, idx: Int, len: Int) {
-        val s = list[idx]
-        vm.select(s, s + len)
-        reveal(s, 0.35f)
+    // 지금 선택된 부분이 검색 결과 중 몇 번째인지
+    val curIdx by remember {
+        derivedStateOf {
+            val f = found
+            val lo = min(selStart, selEnd)
+            val hi = max(selStart, selEnd)
+            if (f.starts.isNotEmpty() && hi - lo == f.len) {
+                val k = lowerBound(f.starts, lo)
+                if (k < f.starts.size && f.starts[k] == lo) k else -1
+            } else -1
+        }
+    }
+
+    fun goTo(start: Int, len: Int) {
+        val n = edit.text.length
+        edit.setSelection(start.coerceIn(0, n), (start + len).coerceIn(0, n))
+        edit.revealOffset(start, 0.35f)
     }
 
     fun step(forward: Boolean) {
-        if (matches.isEmpty()) return
-        val s = vm.value.selection
-        val idx = if (forward) {
-            matches.indexOfFirst { it >= s.max }.let { if (it < 0) 0 else it }
-        } else {
-            matches.indexOfLast { it < s.min }.let { if (it < 0) matches.lastIndex else it }
+        if (query.isEmpty()) return
+        val t = edit.text.toString()
+        val lo = min(edit.selectionStart, edit.selectionEnd).coerceAtLeast(0)
+        val hi = max(edit.selectionStart, edit.selectionEnd).coerceAtLeast(0)
+        var i = when {
+            forward -> t.indexOf(query, hi, ignoreCase = true)
+            lo > 0 -> t.lastIndexOf(query, lo - 1, ignoreCase = true)
+            else -> -1
         }
-        goTo(matches, idx, query.length)
+        if (i < 0) {
+            i = if (forward) t.indexOf(query, 0, ignoreCase = true)
+            else t.lastIndexOf(query, t.length, ignoreCase = true)
+        }
+        if (i >= 0) goTo(i, query.length)
     }
 
     fun onQueryChange(v: TextFieldValue) {
         searchValue = v
+        refs.jumpJob?.cancel()
         val q = v.text
         if (q.isEmpty()) return
-        val m = findAll(vm.value.text, q)
-        if (m.isEmpty()) return
-        val from = vm.value.selection.min
-        val idx = m.indexOfFirst { it >= from }.let { if (it < 0) 0 else it }
-        goTo(m, idx, q.length)
+        // 입력이 멈추면 현재 위치 이후의 첫 결과로 이동
+        refs.jumpJob = scope.launch {
+            delay(150)
+            val snap = edit.text.toString()
+            val from = min(edit.selectionStart, edit.selectionEnd).coerceAtLeast(0)
+            val i = withContext(Dispatchers.Default) {
+                val k = snap.indexOf(q, from, ignoreCase = true)
+                if (k >= 0) k else snap.indexOf(q, 0, ignoreCase = true)
+            }
+            if (i >= 0) goTo(i, q.length)
+        }
     }
 
     /** 지금 선택된 게 검색 결과면 바꾸고 다음 결과로, 아니면 다음 결과로 이동만 한다 */
     fun replaceOne() {
         if (vm.busy || query.isEmpty()) return
-        val s = vm.value.selection
-        val t = vm.value.text
-        val repl = replaceValue.text
-        val onMatch = s.max - s.min == query.length &&
-            t.regionMatches(s.min, query, 0, query.length, ignoreCase = true)
+        val lo = min(edit.selectionStart, edit.selectionEnd).coerceAtLeast(0)
+        val hi = max(edit.selectionStart, edit.selectionEnd).coerceAtLeast(0)
+        val onMatch = hi - lo == query.length &&
+            edit.text.subSequence(lo, hi).toString().equals(query, ignoreCase = true)
         if (!onMatch) {
             step(true)
             return
         }
-        vm.replaceRange(s.min, s.max, repl)
-        val m = findAll(vm.value.text, query)
-        if (m.isEmpty()) return
-        val from = s.min + repl.length
-        val st = m[m.indexOfFirst { it >= from }.let { if (it < 0) 0 else it }]
-        vm.select(st, st + query.length)
-        reveal(st, 0.35f, afterLayout = true)
+        val repl = replaceValue.text
+        edit.text.replace(lo, hi, repl)
+        val after = lo + repl.length
+        val t = edit.text.toString()
+        var i = t.indexOf(query, after, ignoreCase = true)
+        if (i < 0) i = t.indexOf(query, 0, ignoreCase = true)
+        if (i >= 0) goTo(i, query.length) else edit.setSelection(after.coerceAtMost(t.length))
     }
 
     fun requestReplaceAll() {
         if (vm.busy || query.isEmpty()) return
-        val n = countAll(vm.value.text, query)
-        if (n == 0) vm.message = "바꿀 글자가 없어요" else pendingReplaceAll = n
+        val q = query
+        scope.launch {
+            val snap = edit.text.toString()
+            val n = withContext(Dispatchers.Default) { countAll(snap, q) }
+            if (n == 0) vm.message = "바꿀 글자가 없어요" else pendingReplaceAll = n
+        }
+    }
+
+    fun doReplaceAll() {
+        val q = query
+        val r = replaceValue.text
+        scope.launch {
+            val snap = edit.text.toString()
+            val ver = textVersion
+            val (nt, n) = withContext(Dispatchers.Default) { replaceAllText(snap, q, r) }
+            if (n == 0) {
+                vm.message = "바꿀 글자가 없어요"
+                return@launch
+            }
+            if (ver != textVersion) {
+                vm.message = "바꾸는 동안 글이 바뀌어 취소했어요"
+                return@launch
+            }
+            val sy = edit.scrollY
+            val sel = min(edit.selectionStart, edit.selectionEnd).coerceAtLeast(0)
+            refs.loading = true
+            edit.setText(nt)
+            refs.loading = false
+            edit.setSelection(sel.coerceAtMost(nt.length))
+            vm.markEdited()
+            textVersion++
+            edit.doOnLayout { edit.scrollToY(sy) }
+            vm.message = "${n}곳을 바꿨어요"
+        }
     }
 
     fun openSearch() {
-        val s = vm.value.selection
-        val sub = if (!s.collapsed && s.max - s.min <= 100) vm.value.text.substring(s.min, s.max) else ""
-        if (sub.isNotEmpty() && '\n' !in sub) {
-            searchValue = TextFieldValue(sub, TextRange(sub.length))
+        val lo = min(edit.selectionStart, edit.selectionEnd)
+        val hi = max(edit.selectionStart, edit.selectionEnd)
+        if (hi - lo in 1..100) {
+            val sub = edit.text.subSequence(lo, hi).toString()
+            if ('\n' !in sub) searchValue = TextFieldValue(sub, TextRange(sub.length))
         } else if (searchValue.text.isNotEmpty()) {
             searchValue = searchValue.copy(selection = TextRange(0, searchValue.text.length))
         }
@@ -342,24 +508,20 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
         if (searchOpen) searchFocus.requestFocus()
     }
 
-    val highlightNormal = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.35f)
-    val highlightStrong = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-    val highlight = remember(matches, query.length, curIdx, highlightNormal, highlightStrong) {
-        if (matches.isEmpty()) VisualTransformation.None
-        else MatchHighlight(matches, query.length, curIdx, highlightNormal, highlightStrong)
-    }
-
     val countLabel = when {
         query.isEmpty() -> ""
-        matches.isEmpty() -> "결과 없음"
+        found.starts.isEmpty() -> "결과 없음"
         else -> {
-            val total = if (matches.size >= MAX_MATCHES) "$MAX_MATCHES+" else "${matches.size}"
+            val total = if (found.starts.size >= MAX_MATCHES) "$MAX_MATCHES+" else "${found.starts.size}"
             if (curIdx >= 0) "${curIdx + 1}/$total" else "${total}개"
         }
     }
 
     BackHandler(enabled = vm.dirty) { pendingDiscard = onExit }
     BackHandler(enabled = searchOpen) { closeSearch() }
+
+    val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
+    val accentColor = MaterialTheme.colorScheme.primary.toArgb()
 
     Scaffold(
         modifier = Modifier.fillMaxSize().imePadding(),
@@ -383,8 +545,8 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
                         Icon(Icons.Outlined.Search, contentDescription = "검색")
                     }
                     IconButton(onClick = {
-                        vm.selectAll()
-                        focus.requestFocus()
+                        edit.requestFocus()
+                        edit.selectAll()
                     }) {
                         Icon(Icons.Outlined.SelectAll, contentDescription = "전체 선택")
                     }
@@ -418,53 +580,22 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
                     onReplaceAll = { requestReplaceAll() }
                 )
             }
-            BoxWithConstraints(
+            Box(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .onSizeChanged { viewportPx = it.height.toFloat() }
+                    .onSizeChanged { trackPx = it.height.toFloat() }
             ) {
-                val minH = (maxHeight - 32.dp).coerceAtLeast(0.dp)
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .verticalScroll(scrollState)
-                        .padding(16.dp)
-                ) {
-                    BasicTextField(
-                        value = vm.value,
-                        onValueChange = { nv ->
-                            val old = vm.value
-                            vm.onChange(nv)
-                            // 한 번에 2글자 이상 들어왔고 커서가 한 곳에 있으면 붙여넣기(또는 단어 자동완성)로 보고,
-                            // 새 레이아웃이 나오면 커서(=붙여넣은 글의 끝) 쪽으로 화면을 옮긴다
-                            if (nv.text != old.text && nv.selection.collapsed) {
-                                val inserted = nv.selection.start - old.selection.min
-                                if (inserted >= 2) refs.pendingReveal = true
-                            }
-                        },
-                        readOnly = vm.busy,
-                        visualTransformation = highlight,
-                        onTextLayout = { l ->
-                            refs.layout = l
-                            if (refs.pendingReveal) {
-                                refs.pendingReveal = false
-                                reveal(vm.value.selection.end, 0.7f, afterLayout = true)
-                            }
-                        },
-                        textStyle = TextStyle(
-                            color = MaterialTheme.colorScheme.onSurface,
-                            fontSize = 16.sp,
-                            lineHeight = 24.sp
-                        ),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = minH)
-                            .focusRequester(focus)
-                    )
-                }
-                VerticalScrollbar(scrollState, viewportPx)
+                AndroidView(
+                    factory = { edit },
+                    update = { v ->
+                        v.isEnabled = !vm.busy
+                        v.setTextColor(textColor)
+                        v.applyAccent(accentColor)
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+                VerticalScrollbar(metrics, trackPx) { y -> edit.scrollToY(y) }
             }
         }
     }
@@ -477,8 +608,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     pendingReplaceAll = null
-                    val done = vm.replaceAll(query, replaceValue.text)
-                    vm.message = "${done}곳을 바꿨어요"
+                    doReplaceAll()
                 }) { Text("바꾸기") }
             },
             dismissButton = {
@@ -602,12 +732,12 @@ private fun SearchBar(
  * 평소엔 흐리게, 스크롤하거나 잡고 끄는 동안엔 진하게 보인다. 막대를 잡고 끌면 빠르게 이동할 수 있다.
  */
 @Composable
-private fun BoxScope.VerticalScrollbar(state: ScrollState, viewportPx: Float) {
+private fun BoxScope.VerticalScrollbar(m: ScrollMetrics, trackPx: Float, onScrollTo: (Int) -> Unit) {
     val density = LocalDensity.current
     var dragging by remember { mutableStateOf(false) }
     var recentlyScrolled by remember { mutableStateOf(false) }
-    LaunchedEffect(state) {
-        snapshotFlow { state.value }.collectLatest {
+    LaunchedEffect(m) {
+        snapshotFlow { m.scrollY }.collectLatest {
             recentlyScrolled = true
             delay(1200)
             recentlyScrolled = false
@@ -617,29 +747,42 @@ private fun BoxScope.VerticalScrollbar(state: ScrollState, viewportPx: Float) {
     val alpha by animateFloatAsState(if (active) 0.8f else 0.3f, label = "scrollbarAlpha")
     val barWidth by animateDpAsState(if (dragging) 10.dp else 5.dp, label = "scrollbarWidth")
 
-    val max = state.maxValue
-    if (max <= 0 || viewportPx <= 0f) return
-
+    val maxScroll = m.maxScroll
     val minThumb = with(density) { 48.dp.toPx() }
-    val thumbH = (viewportPx * viewportPx / (viewportPx + max)).coerceIn(minThumb, viewportPx)
-    val track = viewportPx - thumbH
-    val maxNow by rememberUpdatedState(max)
+    val thumbH = if (trackPx > 0f) {
+        (trackPx * trackPx / (trackPx + maxScroll)).coerceIn(min(minThumb, trackPx), trackPx)
+    } else 0f
+    val track = trackPx - thumbH
+    val maxNow by rememberUpdatedState(maxScroll)
     val trackNow by rememberUpdatedState(track)
+    val scrollTo by rememberUpdatedState(onScrollTo)
+
+    if (maxScroll <= 0 || trackPx <= 0f) return
 
     Box(
         Modifier
             .align(Alignment.TopEnd)
-            .offset { IntOffset(0, (track * state.value / max).roundToInt()) }
+            .offset {
+                val y = if (maxNow > 0) trackNow * m.scrollY / maxNow else 0f
+                IntOffset(0, y.roundToInt())
+            }
             .width(24.dp)
             .height(with(density) { thumbH.toDp() })
             .pointerInput(Unit) {
+                var startScroll = 0
+                var total = 0f
                 detectVerticalDragGestures(
-                    onDragStart = { dragging = true },
+                    onDragStart = {
+                        dragging = true
+                        startScroll = m.scrollY
+                        total = 0f
+                    },
                     onDragEnd = { dragging = false },
                     onDragCancel = { dragging = false }
                 ) { change, dy ->
                     change.consume()
-                    if (trackNow > 0f) state.dispatchRawDelta(dy * maxNow / trackNow)
+                    total += dy
+                    if (trackNow > 0f) scrollTo((startScroll + total * maxNow / trackNow).roundToInt())
                 }
             },
         contentAlignment = Alignment.CenterEnd
