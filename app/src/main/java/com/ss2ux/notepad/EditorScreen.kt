@@ -337,12 +337,8 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             return
         }
         scope.launch {
-            if (vm.saveTo(target, false, edit.text.toString()) == SaveResult.DENIED) {
-                Toast.makeText(
-                    context, "이 파일에는 바로 저장할 수 없어요. 다른 이름으로 저장해 주세요.", Toast.LENGTH_LONG
-                ).show()
-                saveAs()
-            }
+            // 읽기 전용으로 열린 파일처럼 바로 쓸 수 없으면 안내 문구 없이 "다른 이름으로 저장" 창을 연다
+            if (vm.saveTo(target, false, edit.text.toString()) == SaveResult.DENIED) saveAs()
         }
     }
 

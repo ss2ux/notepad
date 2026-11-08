@@ -191,6 +191,12 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
             return SaveResult.DENIED
         } catch (ex: Exception) {
             saving = false
+            val m = ex.message ?: ""
+            if (ex is java.io.FileNotFoundException &&
+                (m.contains("EACCES") || m.contains("EPERM") || m.contains("Permission denied", ignoreCase = true))
+            ) {
+                return SaveResult.DENIED
+            }
             message = "저장하지 못했어요: ${ex.message ?: ex.javaClass.simpleName}"
             return SaveResult.FAILED
         }
