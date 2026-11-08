@@ -7,6 +7,7 @@ import android.provider.DocumentsContract
 import android.text.Editable
 import android.text.Spanned
 import android.text.TextWatcher
+import android.view.inputmethod.BaseInputConnection
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,11 +20,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -38,16 +41,19 @@ import androidx.compose.material.icons.outlined.FindReplace
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.Redo
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.SaveAs
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SelectAll
+import androidx.compose.material.icons.outlined.Undo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -74,6 +80,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -132,7 +139,10 @@ private fun NotepadEditText.readMetrics(m: ScrollMetrics) {
 /** 상태가 아닌 단순 보관용 */
 private class EditorRefs {
     var loading = false          // 파일 내용을 채워 넣는 중이면 "사용자가 고쳤다"로 치지 않는다
+    var applying = false         // 뒤로/앞으로를 적용하는 중: 고친 것으로는 치되, 새 기록으로 남기지는 않는다
     var pendingPaste = false     // 한 번에 여러 글자가 들어왔다(붙여넣기)
+    var recStart = -1            // 바뀌기 직전의 글 조각(되돌리기 기록용). -1 이면 기록하지 않는 변경
+    var recBefore = ""
     val spans = ArrayList<MatchSpan>()
     var jumpJob: Job? = null
 }
@@ -266,10 +276,21 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
         edit.onMetrics = { edit.readMetrics(metrics) }
         edit.onSelection = { s, e -> selStart = s; selEnd = e }
         val watcher = object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
+                // 파일을 채우는 중이거나 뒤로/앞으로를 적용하는 중에는 기록하지 않는다(큰 글을 복사하지 않도록 먼저 거른다)
+                refs.recStart = -1
+                if (refs.loading || refs.applying || s == null) return
+                refs.recStart = start
+                refs.recBefore = s.subSequence(start, start + count).toString()
+            }
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 // 한 번에 2글자 이상 들어오면 붙여넣기(또는 단어 자동완성)로 본다
-                if (!refs.loading && count >= 2) refs.pendingPaste = true
+                if (!refs.loading && !refs.applying && count >= 2) refs.pendingPaste = true
+                if (refs.recStart == start && s != null) {
+                    vm.history.record(start, refs.recBefore, s.subSequence(start, start + count).toString())
+                }
+                refs.recStart = -1
+                refs.recBefore = ""
             }
             override fun afterTextChanged(s: Editable?) {
                 if (refs.loading) return
@@ -344,6 +365,42 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
 
     fun guardDiscard(action: () -> Unit) {
         if (vm.dirty) pendingDiscard = action else action()
+    }
+
+    /** 뒤로(undo=true) / 앞으로(undo=false). 기록에 남은 변경 한 덩어리를 거꾸로/그대로 적용한다. */
+    fun applyHistory(undo: Boolean) {
+        if (vm.busy) return
+        val op = (if (undo) vm.history.takeUndo() else vm.history.takeRedo()) ?: return
+        val removeLen = if (undo) op.after.length else op.before.length
+        val insert = if (undo) op.before else op.after
+        val t = edit.text
+        if (op.start < 0 || op.start + removeLen > t.length) {
+            // 기록과 글이 어긋난 경우(생기면 안 된다): 잘못 고치지 않도록 기록을 비우고 멈춘다
+            vm.history.clear()
+            vm.message = "기록이 맞지 않아 되돌리기 기록을 지웠어요"
+            return
+        }
+        BaseInputConnection.removeComposingSpans(t)   // 한글 등 조합 중이던 글자를 확정
+        refs.applying = true
+        try {
+            t.replace(op.start, op.start + removeLen, insert)
+        } finally {
+            refs.applying = false
+        }
+        val caret = (op.start + insert.length).coerceIn(0, edit.text.length)
+        edit.requestFocus()
+        edit.setSelection(caret)
+        edit.post { edit.revealOffset(caret) }
+    }
+
+    // 화면 단축키(Ctrl+Z 등)와 길게 누르기 메뉴도 같은 기록을 쓰게 연결
+    DisposableEffect(edit) {
+        edit.onUndo = { applyHistory(true) }
+        edit.onRedo = { applyHistory(false) }
+        onDispose {
+            edit.onUndo = null
+            edit.onRedo = null
+        }
     }
 
     /** 파일에서 다시 읽는다. 보던 위치(커서/스크롤)는 최대한 유지한다. */
@@ -462,7 +519,9 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             return
         }
         val repl = replaceValue.text
+        vm.history.breakMerge()          // 연속으로 눌러도 바꾼 곳마다 한 칸씩
         edit.text.replace(lo, hi, repl)
+        vm.history.breakMerge()
         val after = lo + repl.length
         val t = edit.text.toString()
         var i = t.indexOf(query, after, ignoreCase = true)
@@ -500,6 +559,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             refs.loading = true
             edit.setText(nt)
             refs.loading = false
+            vm.history.record(0, snap, nt, merge = false)   // 모두 바꾸기 전체가 한 칸 (되돌리기 가능)
             edit.setSelection(sel.coerceAtMost(nt.length))
             vm.markEdited()
             textVersion++
@@ -562,43 +622,26 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
                     ) {
                         Icon(Icons.Outlined.FolderOpen, contentDescription = "파일 열기")
                     }
-                },
-                actions = {
-                    if (vm.uri != null) {
-                        IconButton(
-                            onClick = { if (!vm.busy) reloadDialog = true },
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Icon(
-                                Icons.Outlined.Refresh,
-                                contentDescription = "파일에서 다시 불러오기",
-                                tint = if (vm.externalChange) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    IconButton(
-                        onClick = { if (searchOpen) closeSearch() else openSearch() },
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Icon(Icons.Outlined.Search, contentDescription = "검색")
-                    }
-                    IconButton(
-                        onClick = {
-                            edit.requestFocus()
-                            edit.selectAll()
-                        },
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Icon(Icons.Outlined.SelectAll, contentDescription = "전체 선택")
-                    }
-                    IconButton(onClick = { save() }, modifier = Modifier.size(40.dp)) {
-                        Icon(Icons.Outlined.Save, contentDescription = "저장")
-                    }
-                    IconButton(onClick = { saveAs() }, modifier = Modifier.size(40.dp)) {
-                        Icon(Icons.Outlined.SaveAs, contentDescription = "다른 이름으로 저장")
-                    }
                 }
+            )
+        },
+        bottomBar = {
+            BottomBar(
+                canUndo = vm.history.canUndo,
+                canRedo = vm.history.canRedo,
+                canReload = vm.uri != null && !vm.busy,
+                reloadAccent = vm.externalChange,
+                searchOpen = searchOpen,
+                onUndo = { applyHistory(true) },
+                onRedo = { applyHistory(false) },
+                onReload = { reloadDialog = true },
+                onSearch = { if (searchOpen) closeSearch() else openSearch() },
+                onSelectAll = {
+                    edit.requestFocus()
+                    edit.selectAll()
+                },
+                onSave = { save() },
+                onSaveAs = { saveAs() }
             )
         }
     ) { pad ->
@@ -692,6 +735,59 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
                 TextButton(onClick = { pendingDiscard = null }) { Text("취소") }
             }
         )
+    }
+}
+
+/** 하단 도구줄: 뒤로 / 앞으로 / 새로고침 / 검색 / 전체 선택 / 저장 / 다른 이름으로 저장 */
+@Composable
+private fun BottomBar(
+    canUndo: Boolean,
+    canRedo: Boolean,
+    canReload: Boolean,
+    reloadAccent: Boolean,
+    searchOpen: Boolean,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+    onReload: () -> Unit,
+    onSearch: () -> Unit,
+    onSelectAll: () -> Unit,
+    onSave: () -> Unit,
+    onSaveAs: () -> Unit
+) {
+    Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
+        // 배경은 시스템 내비게이션 바 뒤까지 깔고, 버튼은 그 위에 둔다
+        Row(
+            Modifier.navigationBarsPadding().fillMaxWidth().height(52.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BarButton(Icons.Outlined.Undo, "뒤로", enabled = canUndo, onClick = onUndo)
+            BarButton(Icons.Outlined.Redo, "앞으로", enabled = canRedo, onClick = onRedo)
+            BarButton(Icons.Outlined.Refresh, "파일에서 다시 불러오기", enabled = canReload, accent = reloadAccent, onClick = onReload)
+            BarButton(Icons.Outlined.Search, "검색", accent = searchOpen, onClick = onSearch)
+            BarButton(Icons.Outlined.SelectAll, "전체 선택", onClick = onSelectAll)
+            BarButton(Icons.Outlined.Save, "저장", onClick = onSave)
+            BarButton(Icons.Outlined.SaveAs, "다른 이름으로 저장", onClick = onSaveAs)
+        }
+    }
+}
+
+@Composable
+private fun RowScope.BarButton(
+    icon: ImageVector,
+    description: String,
+    enabled: Boolean = true,
+    accent: Boolean = false,
+    onClick: () -> Unit
+) {
+    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+        IconButton(onClick = onClick, enabled = enabled) {
+            Icon(
+                icon,
+                contentDescription = description,
+                // 꺼진 버튼은 IconButton 이 LocalContentColor 를 흐리게 해 준다
+                tint = if (accent && enabled) MaterialTheme.colorScheme.primary else LocalContentColor.current
+            )
+        }
     }
 }
 

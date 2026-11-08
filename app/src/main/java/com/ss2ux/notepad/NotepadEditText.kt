@@ -9,6 +9,7 @@ import android.text.style.UpdateAppearance
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -28,6 +29,9 @@ class NotepadEditText(context: Context) : EditText(context) {
     var onMetrics: (() -> Unit)? = null
     /** 커서/선택이 바뀔 때 (start, end) */
     var onSelection: ((Int, Int) -> Unit)? = null
+    /** 뒤로(Ctrl+Z) / 앞으로(Ctrl+Shift+Z, Ctrl+Y). 안드로이드 기본 undo 대신 앱의 기록을 쓴다. */
+    var onUndo: (() -> Unit)? = null
+    var onRedo: (() -> Unit)? = null
 
     private var accent = 0
     private val scroller = OverScroller(context)
@@ -124,6 +128,29 @@ class NotepadEditText(context: Context) : EditText(context) {
             else -> bottom - viewH + margin
         }
         scrollToY(target)
+    }
+
+    /** 하드웨어 키보드 단축키 */
+    override fun onKeyShortcut(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_Z && event.hasModifiers(KeyEvent.META_CTRL_ON)) {
+            onUndo?.invoke()
+            return true
+        }
+        if ((keyCode == KeyEvent.KEYCODE_Z &&
+                event.hasModifiers(KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON)) ||
+            (keyCode == KeyEvent.KEYCODE_Y && event.hasModifiers(KeyEvent.META_CTRL_ON))
+        ) {
+            onRedo?.invoke()
+            return true
+        }
+        return super.onKeyShortcut(keyCode, event)
+    }
+
+    /** 길게 눌러 나오는 메뉴/키보드의 실행 취소·다시 실행도 앱의 기록으로 보낸다 */
+    override fun onTextContextMenuItem(id: Int): Boolean = when (id) {
+        android.R.id.undo -> { onUndo?.invoke(); true }
+        android.R.id.redo -> { onRedo?.invoke(); true }
+        else -> super.onTextContextMenuItem(id)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {

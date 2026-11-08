@@ -53,6 +53,9 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
     var docVersion by mutableIntStateOf(0)
         private set
 
+    /** 뒤로/앞으로 기록. 화면이 다시 만들어져도 유지되고, 파일을 새로 읽으면 비워진다. */
+    val history = EditHistory()
+
     private var editSeq = 0
     private var diskSig = 0L      // 마지막으로 읽거나 쓴 파일 내용의 지문(CRC32 + 크기)
     private var saving = false
@@ -135,6 +138,7 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
             docSelStart = selStart
             docSelEnd = selEnd
             docScrollY = scrollY
+            history.clear()
             editSeq++
             dirty = false
             diskSig = newSig
