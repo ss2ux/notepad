@@ -1,6 +1,7 @@
 package com.ss2ux.notepad
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
@@ -60,6 +61,22 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
     private var eol = Eol.LF
 
     private val resolver get() = getApplication<Application>().contentResolver
+
+    /**
+     * SAF URI에 대해 읽기+쓰기 영구 권한을 가져온다.
+     * 외부 앱에서 넘어온 URI 등 권한이 없는 경우는 조용히 무시한다.
+     */
+    private fun takePersistable(u: Uri) {
+        try {
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            resolver.takePersistableUriPermission(u, flags)
+        } catch (_: SecurityException) {
+            // 권한을 줄 수 없는 URI (다른 앱에서 VIEW/EDIT으로 넘어온 경우 등)
+        } catch (_: Exception) {
+            // 일부 프로바이더는 지원하지 않음
+        }
+    }
 
     /** 사용자가 글을 고쳤을 때 화면이 부른다 */
     fun markEdited() {
@@ -124,6 +141,7 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
             externalChange = false
             uri = u
             name = queryName(u) ?: UNTITLED
+            takePersistable(u)   // 이후 바로 저장이 가능하도록 영구 쓰기 권한 확보
             docVersion++
         } catch (e: Exception) {
             message = "열지 못했어요: ${e.message ?: e.javaClass.simpleName}"
@@ -185,6 +203,7 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
         if (makeCurrent) {
             uri = target
             name = queryName(target) ?: name
+            takePersistable(target)   // 다른 이름으로 저장한 파일도 이후 바로 저장 가능하게
         }
         if (seq == editSeq) dirty = false
         message = if (enc.fellBack && !wasUtf8) "저장했어요 (글자가 맞지 않아 UTF-8로 저장)" else "저장했어요"
