@@ -15,6 +15,7 @@ import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.charset.Charset
+import java.util.zip.CRC32
 
 enum class SaveResult { OK, DENIED, FAILED }
 
@@ -31,6 +32,9 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
     var dirty by mutableStateOf(false)
         private set
     var busy by mutableStateOf(false)
+        private set
+    /** 우리가 마지막으로 읽거나 쓴 뒤 다른 앱이 파일을 바꿨다 */
+    var externalChange by mutableStateOf(false)
         private set
     /** 한 번 보여 주고 지우는 안내 문구(토스트) */
     var message by mutableStateOf<String?>(null)
@@ -49,6 +53,8 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
         private set
 
     private var editSeq = 0
+    private var diskSig = 0L      // 마지막으로 읽거나 쓴 파일 내용의 지문(CRC32 + 크기)
+    private var saving = false
     private var charset: Charset = Charsets.UTF_8
     private var bom = false
     private var eol = Eol.LF
@@ -73,35 +79,49 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { open(u) }
     }
 
-    suspend fun open(u: Uri) {
+    /** 파일 전체를 읽는다(8MB 상한) */
+    private fun readCapped(u: Uri): ByteArray {
+        val stream = resolver.openInputStream(u) ?: throw IOException("파일을 열 수 없어요")
+        return stream.use { s ->
+            val out = ByteArrayOutputStream()
+            val buf = ByteArray(64 * 1024)
+            var total = 0
+            while (true) {
+                val n = s.read(buf)
+                if (n < 0) break
+                total += n
+                if (total > MAX_BYTES) throw IOException("파일이 너무 커요 (8MB 이하만 열 수 있어요)")
+                out.write(buf, 0, n)
+            }
+            out.toByteArray()
+        }
+    }
+
+    private fun sig(bytes: ByteArray): Long {
+        val c = CRC32()
+        c.update(bytes, 0, bytes.size)
+        return c.value xor (bytes.size.toLong() shl 32)
+    }
+
+    /** selStart/selEnd/scrollY: 다시 불러올 때 보던 위치를 유지하기 위한 값(새로 열 때는 0) */
+    suspend fun open(u: Uri, selStart: Int = 0, selEnd: Int = 0, scrollY: Int = 0) {
         busy = true
         try {
-            val d = withContext(Dispatchers.IO) {
-                val stream = resolver.openInputStream(u) ?: throw IOException("파일을 열 수 없어요")
-                val bytes = stream.use { s ->
-                    val out = ByteArrayOutputStream()
-                    val buf = ByteArray(64 * 1024)
-                    var total = 0
-                    while (true) {
-                        val n = s.read(buf)
-                        if (n < 0) break
-                        total += n
-                        if (total > MAX_BYTES) throw IOException("파일이 너무 커요 (8MB 이하만 열 수 있어요)")
-                        out.write(buf, 0, n)
-                    }
-                    out.toByteArray()
-                }
-                TextCodec.decode(bytes)
+            val (d, newSig) = withContext(Dispatchers.IO) {
+                val bytes = readCapped(u)
+                TextCodec.decode(bytes) to sig(bytes)
             }
             charset = d.charset
             bom = d.bom
             eol = d.eol
             docText = d.text
-            docSelStart = 0
-            docSelEnd = 0
-            docScrollY = 0
+            docSelStart = selStart
+            docSelEnd = selEnd
+            docScrollY = scrollY
             editSeq++
             dirty = false
+            diskSig = newSig
+            externalChange = false
             uri = u
             name = queryName(u) ?: UNTITLED
             docVersion++
@@ -113,27 +133,52 @@ class EditorVm(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 파일이 마지막으로 읽거나 쓴 뒤 다른 앱에서 바뀌었는지 확인한다.
+     * 새로 바뀐 것을 알아챘으면 true. (파일 제공 앱마다 수정 시각이 믿을 만하지 않아서 내용 지문으로 비교한다)
+     */
+    suspend fun checkExternalChange(): Boolean {
+        val u = uri ?: return false
+        if (busy || saving || externalChange) return false
+        val now = try {
+            withContext(Dispatchers.IO) { sig(readCapped(u)) }
+        } catch (e: Exception) {
+            return false   // 못 읽는 경우(권한/삭제 등)는 조용히 넘어간다
+        }
+        if (saving || now == diskSig) return false
+        externalChange = true
+        return true
+    }
+
+    /**
      * target 에 text 를 쓴다. makeCurrent 가 true 면(다른 이름으로 저장) 이후 이 파일이 현재 파일이 된다.
      * text 는 호출한 쪽이 EditText 에서 방금 꺼낸 글이어야 한다.
      */
     suspend fun saveTo(target: Uri, makeCurrent: Boolean, text: String): SaveResult {
         val seq = editSeq   // 저장하는 동안 더 고친 내용이 있으면 저장 후에도 "수정됨"으로 남긴다
+        saving = true
         val cs = charset
         val useBom = bom
         val e = eol
         val enc: Encoded
+        val newSig: Long
         try {
             enc = withContext(Dispatchers.Default) { TextCodec.encode(text, e, cs, useBom) }
-            withContext(Dispatchers.IO) {
+            newSig = withContext(Dispatchers.IO) {
                 val out = resolver.openOutputStream(target, "wt") ?: throw IOException("파일을 열 수 없어요")
                 out.use { it.write(enc.bytes) }
+                sig(enc.bytes)
             }
         } catch (ex: SecurityException) {
+            saving = false
             return SaveResult.DENIED
         } catch (ex: Exception) {
+            saving = false
             message = "저장하지 못했어요: ${ex.message ?: ex.javaClass.simpleName}"
             return SaveResult.FAILED
         }
+        saving = false
+        diskSig = newSig
+        externalChange = false
         val wasUtf8 = cs == Charsets.UTF_8
         charset = enc.charset
         bom = enc.bom

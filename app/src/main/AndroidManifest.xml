@@ -15,7 +15,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- 1) 종류(MIME)로 연결: 파일 관리자가 자막/텍스트 종류를 알려 주는 경우 -->
+            <!-- 1) 종류(MIME)로 연결: 파일 앱이 .txt / .vtt / .srt / .lrc 에 붙여 주는 종류 이름들 -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.EDIT" />
@@ -24,10 +24,17 @@
                 <data android:scheme="file" />
                 <data android:mimeType="text/plain" />
                 <data android:mimeType="text/vtt" />
+                <data android:mimeType="text/webvtt" />
                 <data android:mimeType="text/srt" />
-                <data android:mimeType="text/x-lrc" />
+                <data android:mimeType="text/x-srt" />
+                <data android:mimeType="text/x-subrip" />
                 <data android:mimeType="application/x-subrip" />
+                <data android:mimeType="application/srt" />
+                <data android:mimeType="application/x-srt" />
+                <data android:mimeType="text/x-lrc" />
+                <data android:mimeType="text/lrc" />
                 <data android:mimeType="application/x-lrc" />
+                <data android:mimeType="application/lrc" />
             </intent-filter>
 
             <!-- 2) 확장자로 연결: 종류를 모르는 파일(octet-stream 등)이라도 이름이 .vtt .srt .lrc .txt 이면 -->
@@ -51,7 +58,20 @@
                 <data android:pathPattern=".*\\.txt" />
                 <data android:pathPattern=".*\\..*\\.txt" />
                 <data android:pathPattern=".*\\..*\\..*\\.txt" />
+                <data android:pathPattern=".*\\.VTT" />
+                <data android:pathPattern=".*\\..*\\.VTT" />
+                <data android:pathPattern=".*\\..*\\..*\\.VTT" />
+                <data android:pathPattern=".*\\.SRT" />
+                <data android:pathPattern=".*\\..*\\.SRT" />
+                <data android:pathPattern=".*\\..*\\..*\\.SRT" />
+                <data android:pathPattern=".*\\.LRC" />
+                <data android:pathPattern=".*\\..*\\.LRC" />
+                <data android:pathPattern=".*\\..*\\..*\\.LRC" />
+                <data android:pathPattern=".*\\.TXT" />
+                <data android:pathPattern=".*\\..*\\.TXT" />
+                <data android:pathPattern=".*\\..*\\..*\\.TXT" />
             </intent-filter>
+
         </activity>
     </application>
 </manifest>

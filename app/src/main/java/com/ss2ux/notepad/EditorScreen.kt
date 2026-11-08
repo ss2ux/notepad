@@ -38,6 +38,7 @@ import androidx.compose.material.icons.outlined.FindReplace
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.SaveAs
 import androidx.compose.material.icons.outlined.Search
@@ -87,6 +88,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.doOnLayout
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -255,6 +258,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
     var replaceOpen by remember { mutableStateOf(false) }
     var replaceValue by remember { mutableStateOf(TextFieldValue("")) }
     var pendingReplaceAll by remember { mutableStateOf<Int?>(null) }
+    var reloadDialog by remember { mutableStateOf(false) }
     val query = searchValue.text
 
     // EditText 와 연결: 고쳤는지 알아채고, 스크롤바/선택 위치를 갱신하고, 화면이 사라질 때 글을 맡겨 둔다
@@ -344,6 +348,26 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
 
     fun guardDiscard(action: () -> Unit) {
         if (vm.dirty) pendingDiscard = action else action()
+    }
+
+    /** 파일에서 다시 읽는다. 보던 위치(커서/스크롤)는 최대한 유지한다. */
+    fun reload() {
+        val u = vm.uri ?: return
+        scope.launch {
+            vm.open(
+                u,
+                edit.selectionStart.coerceAtLeast(0),
+                edit.selectionEnd.coerceAtLeast(0),
+                edit.scrollY
+            )
+        }
+    }
+
+    // 다른 앱에서 파일을 고치고 돌아왔는지 확인한다
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        scope.launch {
+            if (vm.checkExternalChange()) reloadDialog = true
+        }
     }
 
     // ---- 검색 -----------------------------------------------------------------
@@ -529,31 +553,53 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             TopAppBar(
                 title = {
                     Text(
-                        text = (if (vm.dirty) "* " else "") + vm.name,
+                        text = (if (vm.dirty || vm.externalChange) "* " else "") + vm.name,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleMedium
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = { guardDiscard { openLauncher.launch(arrayOf("*/*")) } }) {
+                    IconButton(
+                        onClick = { guardDiscard { openLauncher.launch(arrayOf("*/*")) } },
+                        modifier = Modifier.size(40.dp)
+                    ) {
                         Icon(Icons.Outlined.FolderOpen, contentDescription = "파일 열기")
                     }
                 },
                 actions = {
-                    IconButton(onClick = { if (searchOpen) closeSearch() else openSearch() }) {
+                    if (vm.uri != null) {
+                        IconButton(
+                            onClick = { if (!vm.busy) reloadDialog = true },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.Refresh,
+                                contentDescription = "파일에서 다시 불러오기",
+                                tint = if (vm.externalChange) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { if (searchOpen) closeSearch() else openSearch() },
+                        modifier = Modifier.size(40.dp)
+                    ) {
                         Icon(Icons.Outlined.Search, contentDescription = "검색")
                     }
-                    IconButton(onClick = {
-                        edit.requestFocus()
-                        edit.selectAll()
-                    }) {
+                    IconButton(
+                        onClick = {
+                            edit.requestFocus()
+                            edit.selectAll()
+                        },
+                        modifier = Modifier.size(40.dp)
+                    ) {
                         Icon(Icons.Outlined.SelectAll, contentDescription = "전체 선택")
                     }
-                    IconButton(onClick = { save() }) {
+                    IconButton(onClick = { save() }, modifier = Modifier.size(40.dp)) {
                         Icon(Icons.Outlined.Save, contentDescription = "저장")
                     }
-                    IconButton(onClick = { saveAs() }) {
+                    IconButton(onClick = { saveAs() }, modifier = Modifier.size(40.dp)) {
                         Icon(Icons.Outlined.SaveAs, contentDescription = "다른 이름으로 저장")
                     }
                 }
@@ -613,6 +659,27 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             },
             dismissButton = {
                 TextButton(onClick = { pendingReplaceAll = null }) { Text("취소") }
+            }
+        )
+    }
+
+    if (reloadDialog) {
+        AlertDialog(
+            onDismissRequest = { reloadDialog = false },
+            title = { Text(if (vm.externalChange) "다른 앱에서 파일이 수정됐어요" else "파일 새로고침") },
+            text = {
+                Text(
+                    buildString {
+                        append(if (vm.externalChange) "변경된 내용을 다시 불러올까요?" else "파일에서 다시 불러올까요?")
+                        if (vm.dirty) append("\n저장하지 않은 수정 내용은 사라져요.")
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { reloadDialog = false; reload() }) { Text("불러오기") }
+            },
+            dismissButton = {
+                TextButton(onClick = { reloadDialog = false }) { Text("나중에") }
             }
         )
     }
