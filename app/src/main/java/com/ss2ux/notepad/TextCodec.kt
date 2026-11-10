@@ -67,7 +67,11 @@ object TextCodec {
     }
 
     fun encode(text: String, eol: Eol, charset: Charset, bom: Boolean): Encoded {
-        val joined = if (eol == Eol.LF) text else text.replace("\n", eol.seq)
+        // 붙여넣기 등으로 들어온 \r\n / \r 을 먼저 \n 으로 통일한 뒤, 저장용 줄바꿈으로 바꾼다.
+        // 안 하면 CRLF 파일에 DeepL 등에서 온 \r\n 이 다시 \r\n 으로 치환되며 \r\r\n 이 되어
+        // 다시 열었을 때 매 줄마다 빈 줄이 생긴다.
+        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+        val joined = if (eol == Eol.LF) normalized else normalized.replace("\n", eol.seq)
         var cs = charset
         var useBom = bom
         var fell = false
