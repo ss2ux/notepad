@@ -7,9 +7,12 @@ import android.text.TextPaint
 import android.text.style.CharacterStyle
 import android.text.style.UpdateAppearance
 import android.util.TypedValue
+import android.view.ActionMode
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.Menu
+import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -18,10 +21,14 @@ import android.widget.OverScroller
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+/** 선택 메뉴에서 고른 번역 엔진 */
+enum class TranslateEngine { DEEPL, GOOGLE }
+
 /**
  * 글이 아주 길어도 빠르게 고칠 수 있도록 Compose 글자칸 대신 쓰는 안드로이드 기본 EditText.
  * 기본 EditText 는 고친 문단만 다시 배치하고, 커서 따라가기·선택 핸들·붙여넣기도 시스템이 처리한다.
  * 여기에 (1) 손가락을 튕겨 넘기는 스크롤, (2) 원하는 위치로 화면 옮기기, (3) 스크롤바 갱신 알림을 더했다.
+ * 선택 드래그 메뉴에 DeepL / Google 번역 항목을 붙인다.
  */
 class NotepadEditText(context: Context) : EditText(context) {
 
@@ -32,6 +39,11 @@ class NotepadEditText(context: Context) : EditText(context) {
     /** 뒤로(Ctrl+Z) / 앞으로(Ctrl+Shift+Z, Ctrl+Y). 안드로이드 기본 undo 대신 앱의 기록을 쓴다. */
     var onUndo: (() -> Unit)? = null
     var onRedo: (() -> Unit)? = null
+    /**
+     * 선택 메뉴에서 번역을 눌렀을 때.
+     * (엔진, 선택된 글, 시작 오프셋, 끝 오프셋)
+     */
+    var onTranslate: ((TranslateEngine, String, Int, Int) -> Unit)? = null
 
     private var accent = 0
     private val scroller = OverScroller(context)
@@ -71,6 +83,57 @@ class NotepadEditText(context: Context) : EditText(context) {
         overScrollMode = View.OVER_SCROLL_NEVER
         isSaveEnabled = false                   // 큰 글이 상태 저장(Bundle)에 실리지 않게
         setHorizontallyScrolling(false)
+        // 글자 선택(드래그) 메뉴에 DeepL·Google 번역 추가
+        customSelectionActionModeCallback = translateActionModeCallback
+    }
+
+    private val translateActionModeCallback = object : ActionMode.Callback {
+        override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+            // 시스템 기본 항목(복사/잘라내기 등)은 그대로 두고, 번역만 덧붙인다
+            menu.add(0, ID_DEEPL, 50, "DeepL 번역")
+                .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            menu.add(0, ID_GOOGLE, 51, "Google 번역")
+                .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            return true
+        }
+
+        override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+            // 선택 범위가 바뀌어도 번역 항목이 유지되게
+            if (menu.findItem(ID_DEEPL) == null) {
+                menu.add(0, ID_DEEPL, 50, "DeepL 번역")
+                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            }
+            if (menu.findItem(ID_GOOGLE) == null) {
+                menu.add(0, ID_GOOGLE, 51, "Google 번역")
+                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            }
+            return true
+        }
+
+        override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+            val engine = when (item.itemId) {
+                ID_DEEPL -> TranslateEngine.DEEPL
+                ID_GOOGLE -> TranslateEngine.GOOGLE
+                else -> return false
+            }
+            val a = selectionStart.coerceAtMost(selectionEnd).coerceAtLeast(0)
+            val b = selectionStart.coerceAtLeast(selectionEnd).coerceAtMost(text.length)
+            if (a >= b) {
+                mode.finish()
+                return true
+            }
+            val src = text.subSequence(a, b).toString()
+            onTranslate?.invoke(engine, src, a, b)
+            mode.finish()
+            return true
+        }
+
+        override fun onDestroyActionMode(mode: ActionMode) {}
+    }
+
+    private companion object {
+        const val ID_DEEPL = 0x5E2D01
+        const val ID_GOOGLE = 0x5E2D02
     }
 
     fun dp(v: Float): Int =

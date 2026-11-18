@@ -1,7 +1,9 @@
 package com.ss2ux.notepad
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.text.Editable
@@ -271,10 +273,110 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
     var reloadDialog by remember { mutableStateOf(false) }
     val query = searchValue.text
 
+    // ---- DeepL / Google 번역 (선택 메뉴) ----
+    // PROCESS_TEXT 결과를 돌려받으면 선택했던 구간을 번역문으로 바꾼다.
+    // Pair(start, end) — end 는 exclusive
+    var translateRange by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    val translateLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val out = result.data?.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()
+        val range = translateRange
+        if (result.resultCode == Activity.RESULT_OK && !out.isNullOrBlank() && range != null) {
+            val len = edit.text.length
+            val a = range.first.coerceIn(0, len)
+            val b = range.second.coerceIn(a, len)
+            // Editable 에 직접 넣어 TextWatcher → 실행 취소 기록도 남김
+            edit.text.replace(a, b, out)
+            val newEnd = (a + out.length).coerceAtMost(edit.text.length)
+            edit.setSelection(newEnd)
+            edit.revealOffset(newEnd, 0.7f)
+        }
+        translateRange = null
+    }
+
+    fun startTranslate(engine: TranslateEngine, src: String, start: Int, end: Int) {
+        if (src.isBlank()) {
+            Toast.makeText(context, "번역할 글자가 없어요", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val pm = context.packageManager
+        fun matches(ri: android.content.pm.ResolveInfo): Boolean {
+            val pkg = ri.activityInfo.packageName
+            val label = ri.loadLabel(pm).toString()
+            return when (engine) {
+                TranslateEngine.DEEPL ->
+                    pkg.contains("deepl", true) || label.contains("deepl", true)
+                TranslateEngine.GOOGLE ->
+                    pkg.contains("google.android.apps.translate", true) ||
+                        pkg.contains("google.translate", true) ||
+                        (label.contains("Google", true) && label.contains("번역", true)) ||
+                        (label.contains("Google", true) && label.contains("Translate", true)) ||
+                        label.equals("Translate", true)
+            }
+        }
+        val engineName = when (engine) {
+            TranslateEngine.DEEPL -> "DeepL"
+            TranslateEngine.GOOGLE -> "Google 번역"
+        }
+        try {
+            // 1순위: PROCESS_TEXT — 결과를 받아 선택 구간을 바로 교체
+            val pt = pm.queryIntentActivities(
+                Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain"),
+                PackageManager.MATCH_DEFAULT_ONLY
+            ).firstOrNull { matches(it) }
+            if (pt != null) {
+                translateRange = start to end
+                translateLauncher.launch(
+                    Intent(Intent.ACTION_PROCESS_TEXT)
+                        .setClassName(pt.activityInfo.packageName, pt.activityInfo.name)
+                        .setType("text/plain")
+                        .putExtra(Intent.EXTRA_PROCESS_TEXT, src)
+                        .putExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, false)
+                )
+                return
+            }
+            // 2순위: 공유(SEND) — 결과는 앱에서 복사해 붙여넣어야 함
+            val sd = pm.queryIntentActivities(
+                Intent(Intent.ACTION_SEND).setType("text/plain"),
+                PackageManager.MATCH_DEFAULT_ONLY
+            ).firstOrNull { matches(it) }
+            if (sd != null) {
+                context.startActivity(
+                    Intent(Intent.ACTION_SEND)
+                        .setClassName(sd.activityInfo.packageName, sd.activityInfo.name)
+                        .setType("text/plain")
+                        .putExtra(Intent.EXTRA_TEXT, src)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                Toast.makeText(
+                    context,
+                    "번역문은 $engineName 에서 복사한 뒤 붙여넣어 주세요",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+            Toast.makeText(
+                context,
+                "$engineName 앱을 찾지 못했어요. 설치되어 있는지 확인해 주세요",
+                Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Exception) {
+            translateRange = null
+            Toast.makeText(context, "$engineName 을(를) 열지 못했어요", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 최신 startTranslate 를 선택 메뉴 콜백에 연결 (Composable 재구성 후에도 최신 상태 사용)
+    val translateHandler = rememberUpdatedState { engine: TranslateEngine, src: String, a: Int, b: Int ->
+        startTranslate(engine, src, a, b)
+    }
+
     // EditText 와 연결: 고쳤는지 알아채고, 스크롤바/선택 위치를 갱신하고, 화면이 사라질 때 글을 맡겨 둔다
     DisposableEffect(edit) {
         edit.onMetrics = { edit.readMetrics(metrics) }
         edit.onSelection = { s, e -> selStart = s; selEnd = e }
+        edit.onTranslate = { engine, src, a, b -> translateHandler.value(engine, src, a, b) }
         val watcher = object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
                 // 파일을 채우는 중이거나 뒤로/앞으로를 적용하는 중에는 기록하지 않는다(큰 글을 복사하지 않도록 먼저 거른다)
@@ -311,6 +413,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             edit.removeTextChangedListener(watcher)
             edit.onMetrics = null
             edit.onSelection = null
+            edit.onTranslate = null
             vm.stash(edit.text.toString(), edit.selectionStart, edit.selectionEnd, edit.scrollY)
         }
     }

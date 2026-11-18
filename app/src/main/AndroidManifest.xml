@@ -1,5 +1,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- 파일은 시스템 파일 선택기(SAF)나 다른 앱이 넘겨준 주소로만 열고 저장하므로 저장소 권한이 필요 없다. 인터넷 권한도 없다. -->
+    <!-- Android 11+ 에서 DeepL / Google 번역 앱을 찾기 위해 PROCESS_TEXT·SEND 쿼리 공개 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <package android:name="com.deepl.android.app" />
+        <package android:name="com.deepl.android.translate" />
+        <package android:name="com.google.android.apps.translate" />
+    </queries>
     <application
         android:label="자막 메모장"
         android:icon="@mipmap/ic_launcher"
