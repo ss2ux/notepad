@@ -84,51 +84,48 @@ class NotepadEditText(context: Context) : EditText(context) {
         isSaveEnabled = false                   // 큰 글이 상태 저장(Bundle)에 실리지 않게
         setHorizontallyScrolling(false)
         // 글자 선택(드래그) 메뉴에 DeepL·Google 번역 추가
-        customSelectionActionModeCallback = translateActionModeCallback
-    }
-
-    private val translateActionModeCallback = object : ActionMode.Callback {
-        override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-            // 시스템 기본 항목(복사/잘라내기 등)은 그대로 두고, 번역만 덧붙인다
-            menu.add(0, ID_DEEPL, 50, "DeepL 번역")
-                .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
-            menu.add(0, ID_GOOGLE, 51, "Google 번역")
-                .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
-            return true
-        }
-
-        override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
-            // 선택 범위가 바뀌어도 번역 항목이 유지되게
-            if (menu.findItem(ID_DEEPL) == null) {
+        customSelectionActionModeCallback = object : ActionMode.Callback {
+            override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                // 시스템 기본 항목(복사/잘라내기 등)은 그대로 두고, 번역만 덧붙인다
                 menu.add(0, ID_DEEPL, 50, "DeepL 번역")
                     .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
-            }
-            if (menu.findItem(ID_GOOGLE) == null) {
                 menu.add(0, ID_GOOGLE, 51, "Google 번역")
                     .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                return true
             }
-            return true
-        }
 
-        override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
-            val engine = when (item.itemId) {
-                ID_DEEPL -> TranslateEngine.DEEPL
-                ID_GOOGLE -> TranslateEngine.GOOGLE
-                else -> return false
+            override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+                if (menu.findItem(ID_DEEPL) == null) {
+                    menu.add(0, ID_DEEPL, 50, "DeepL 번역")
+                        .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                }
+                if (menu.findItem(ID_GOOGLE) == null) {
+                    menu.add(0, ID_GOOGLE, 51, "Google 번역")
+                        .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                }
+                return true
             }
-            val a = selectionStart.coerceAtMost(selectionEnd).coerceAtLeast(0)
-            val b = selectionStart.coerceAtLeast(selectionEnd).coerceAtMost(text.length)
-            if (a >= b) {
+
+            override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+                val engine = when (item.itemId) {
+                    ID_DEEPL -> TranslateEngine.DEEPL
+                    ID_GOOGLE -> TranslateEngine.GOOGLE
+                    else -> return false
+                }
+                val a = selectionStart.coerceAtMost(selectionEnd).coerceAtLeast(0)
+                val b = selectionStart.coerceAtLeast(selectionEnd).coerceAtMost(text.length)
+                if (a >= b) {
+                    mode.finish()
+                    return true
+                }
+                val src = text.subSequence(a, b).toString()
+                onTranslate?.invoke(engine, src, a, b)
                 mode.finish()
                 return true
             }
-            val src = text.subSequence(a, b).toString()
-            onTranslate?.invoke(engine, src, a, b)
-            mode.finish()
-            return true
-        }
 
-        override fun onDestroyActionMode(mode: ActionMode) {}
+            override fun onDestroyActionMode(mode: ActionMode) {}
+        }
     }
 
     private companion object {
