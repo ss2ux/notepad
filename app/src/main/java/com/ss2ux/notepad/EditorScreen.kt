@@ -1,6 +1,7 @@
 package com.ss2ux.notepad
 
 import android.app.Activity
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -274,25 +275,69 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
     val query = searchValue.text
 
     // ---- DeepL / Google 번역 (선택 메뉴) ----
-    // PROCESS_TEXT 결과를 돌려받으면 선택했던 구간을 번역문으로 바꾼다.
-    // Pair(start, end) — end 는 exclusive
+    // 1) PROCESS_TEXT 결과  2) DeepL에서 복사 후 복귀 시 클립보드
+    // Pair(start, end) — end 는 exclusive. source 는 보냈던 원문(클립보드 비교용)
     var translateRange by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var translateSource by remember { mutableStateOf<String?>(null) }
+
+    fun readClipboard(): String? {
+        return try {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip ?: return null
+            if (clip.itemCount <= 0) return null
+            clip.getItemAt(0).coerceToText(context)?.toString()?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 선택 구간에 번역문 넣고 커서 이동. 성공하면 true */
+    fun applyTranslation(out: String, range: Pair<Int, Int>): Boolean {
+        if (out.isBlank()) return false
+        val len = edit.text.length
+        val a = range.first.coerceIn(0, len)
+        val b = range.second.coerceIn(a, len)
+        edit.text.replace(a, b, out)
+        val newEnd = (a + out.length).coerceAtMost(edit.text.length)
+        edit.setSelection(newEnd)
+        edit.revealOffset(newEnd, 0.7f)
+        return true
+    }
+
+    /**
+     * 번역 앱에서 돌아온 뒤 반영 시도.
+     * PROCESS_TEXT 결과 → 없으면 클립보드(원문과 다를 때만).
+     */
+    fun tryApplyTranslation(processTextResult: String?) {
+        val range = translateRange ?: return
+        val src = translateSource
+        val fromResult = processTextResult?.takeIf { it.isNotBlank() }
+        val fromClip = readClipboard()
+        val out = when {
+            !fromResult.isNullOrBlank() -> fromResult
+            // 복사로 가져온 번역문: 원문과 같으면 무시 (아직 복사 안 한 상태)
+            !fromClip.isNullOrBlank() && fromClip != src -> fromClip
+            else -> null
+        }
+        if (out != null && applyTranslation(out, range)) {
+            Toast.makeText(context, "번역문을 반영했어요", Toast.LENGTH_SHORT).show()
+            translateRange = null
+            translateSource = null
+        }
+        // 클립보드에 아직 새 글이 없으면 range 유지 → ON_RESUME 에서 다시 시도
+    }
+
     val translateLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val out = result.data?.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()
-        val range = translateRange
-        if (result.resultCode == Activity.RESULT_OK && !out.isNullOrBlank() && range != null) {
-            val len = edit.text.length
-            val a = range.first.coerceIn(0, len)
-            val b = range.second.coerceIn(a, len)
-            // Editable 에 직접 넣어 TextWatcher → 실행 취소 기록도 남김
-            edit.text.replace(a, b, out)
-            val newEnd = (a + out.length).coerceAtMost(edit.text.length)
-            edit.setSelection(newEnd)
-            edit.revealOffset(newEnd, 0.7f)
+        // RESULT_OK 가 아니어도 DeepL에서 복사만 하고 돌아온 경우가 많음
+        tryApplyTranslation(out)
+        // 반영 못했으면 range 유지 (아래에서 resume 시 클립보드 재시도)
+        if (translateRange != null && out.isNullOrBlank()) {
+            // 한 번 더 클립보드만 확인
+            tryApplyTranslation(null)
         }
-        translateRange = null
     }
 
     fun startTranslate(engine: TranslateEngine, src: String, start: Int, end: Int) {
@@ -320,13 +365,14 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             TranslateEngine.GOOGLE -> "Google 번역"
         }
         try {
-            // 1순위: PROCESS_TEXT — 결과를 받아 선택 구간을 바로 교체
+            translateRange = start to end
+            translateSource = src
+            // 1순위: PROCESS_TEXT
             val pt = pm.queryIntentActivities(
                 Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain"),
                 PackageManager.MATCH_DEFAULT_ONLY
             ).firstOrNull { matches(it) }
             if (pt != null) {
-                translateRange = start to end
                 translateLauncher.launch(
                     Intent(Intent.ACTION_PROCESS_TEXT)
                         .setClassName(pt.activityInfo.packageName, pt.activityInfo.name)
@@ -334,9 +380,14 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
                         .putExtra(Intent.EXTRA_PROCESS_TEXT, src)
                         .putExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, false)
                 )
+                Toast.makeText(
+                    context,
+                    "번역 후 복사하거나 삽입하면 이 앱으로 돌아와 반영돼요",
+                    Toast.LENGTH_SHORT
+                ).show()
                 return
             }
-            // 2순위: 공유(SEND) — 결과는 앱에서 복사해 붙여넣어야 함
+            // 2순위: 공유(SEND) — 돌아와 클립보드로 반영
             val sd = pm.queryIntentActivities(
                 Intent(Intent.ACTION_SEND).setType("text/plain"),
                 PackageManager.MATCH_DEFAULT_ONLY
@@ -351,11 +402,13 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
                 )
                 Toast.makeText(
                     context,
-                    "번역문은 $engineName 에서 복사한 뒤 붙여넣어 주세요",
+                    "번역문을 복사한 뒤 이 앱으로 돌아오면 자동으로 반영해요",
                     Toast.LENGTH_LONG
                 ).show()
                 return
             }
+            translateRange = null
+            translateSource = null
             Toast.makeText(
                 context,
                 "$engineName 앱을 찾지 못했어요. 설치되어 있는지 확인해 주세요",
@@ -363,6 +416,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             ).show()
         } catch (e: Exception) {
             translateRange = null
+            translateSource = null
             Toast.makeText(context, "$engineName 을(를) 열지 못했어요", Toast.LENGTH_SHORT).show()
         }
     }
@@ -519,10 +573,14 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
         }
     }
 
-    // 다른 앱에서 파일을 고치고 돌아왔는지 확인한다
+    // 다른 앱에서 파일을 고치고 돌아왔는지 확인 + 번역 앱에서 복사 후 복귀 시 클립보드 반영
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         scope.launch {
             if (vm.checkExternalChange()) reloadDialog = true
+        }
+        // DeepL 등에서 복사만 하고 돌아온 경우: 선택 구간에 클립보드 반영
+        if (translateRange != null) {
+            tryApplyTranslation(null)
         }
     }
 
