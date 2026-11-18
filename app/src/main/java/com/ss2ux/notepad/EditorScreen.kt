@@ -275,10 +275,11 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
     val query = searchValue.text
 
     // ---- DeepL / Google 번역 (선택 메뉴) ----
-    // 1) PROCESS_TEXT 결과  2) DeepL에서 복사 후 복귀 시 클립보드
-    // Pair(start, end) — end 는 exclusive. source 는 보냈던 원문(클립보드 비교용)
+    // 1) PROCESS_TEXT 결과  2) 복사 후 복귀 시 클립보드
+    // 클립보드는 번역 시작 전 스냅샷과 다를 때만 사용 (예전 복사본 오반영 방지)
     var translateRange by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var translateSource by remember { mutableStateOf<String?>(null) }
+    var clipboardAtLaunch by remember { mutableStateOf<String?>(null) }
 
     fun readClipboard(): String? {
         return try {
@@ -306,25 +307,26 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
 
     /**
      * 번역 앱에서 돌아온 뒤 반영 시도.
-     * PROCESS_TEXT 결과 → 없으면 클립보드(원문과 다를 때만).
+     * PROCESS_TEXT 결과 → 없으면 클립보드(원문·시작 전 클립보드와 모두 다를 때만).
      */
     fun tryApplyTranslation(processTextResult: String?) {
         val range = translateRange ?: return
         val src = translateSource
+        val snap = clipboardAtLaunch
         val fromResult = processTextResult?.takeIf { it.isNotBlank() }
         val fromClip = readClipboard()
         val out = when {
             !fromResult.isNullOrBlank() -> fromResult
-            // 복사로 가져온 번역문: 원문과 같으면 무시 (아직 복사 안 한 상태)
-            !fromClip.isNullOrBlank() && fromClip != src -> fromClip
+            !fromClip.isNullOrBlank() && fromClip != src && fromClip != snap -> fromClip
             else -> null
         }
         if (out != null && applyTranslation(out, range)) {
             Toast.makeText(context, "번역문을 반영했어요", Toast.LENGTH_SHORT).show()
             translateRange = null
             translateSource = null
+            clipboardAtLaunch = null
         }
-        // 클립보드에 아직 새 글이 없으면 range 유지 → ON_RESUME 에서 다시 시도
+        // 복사 없이 나오면 아무것도 안 함
     }
 
     val translateLauncher = rememberLauncherForActivityResult(
@@ -367,6 +369,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
         try {
             translateRange = start to end
             translateSource = src
+            clipboardAtLaunch = readClipboard() // 예전 복사본 스냅샷
             // 1순위: PROCESS_TEXT
             val pt = pm.queryIntentActivities(
                 Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain"),
@@ -409,6 +412,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
             }
             translateRange = null
             translateSource = null
+            clipboardAtLaunch = null
             Toast.makeText(
                 context,
                 "$engineName 앱을 찾지 못했어요. 설치되어 있는지 확인해 주세요",
@@ -417,6 +421,7 @@ fun EditorScreen(vm: EditorVm, onExit: () -> Unit) {
         } catch (e: Exception) {
             translateRange = null
             translateSource = null
+            clipboardAtLaunch = null
             Toast.makeText(context, "$engineName 을(를) 열지 못했어요", Toast.LENGTH_SHORT).show()
         }
     }
